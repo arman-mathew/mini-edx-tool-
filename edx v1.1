@@ -1,0 +1,116 @@
+making code for hop 1 and hop 2 and for -1 hop
+
+import pandas as pd
+from geopy.distance import geodesic
+import simplekml
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter import ttk
+import threading
+
+def select_file(entry):
+    file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+    entry.delete(0, tk.END)
+    entry.insert(0, file_path)
+
+def process_files(gateways_path, meters_path, threshold, progress, button):
+    try:
+        gateways = pd.read_csv(gateways_path)
+        meters = pd.read_csv(meters_path)
+        meters["hop_level"] = -1
+        meters["nearest"] = None
+
+        kml = simplekml.Kml()
+        total_meters = len(meters)
+        hop1_coords = []
+
+        # First pass: Hop 1 (green lines to gateways)
+        for i, meter in meters.iterrows():
+            meter_coord = (meter['Latitude'], meter['Longitude'])
+            nearest_gateway = None
+            min_distance = float('inf')
+
+            for _, gateway in gateways.iterrows():
+                gateway_coord = (gateway['Latitude'], gateway['Longitude'])
+                distance = geodesic(meter_coord, gateway_coord).meters
+                if distance < min_distance and distance <= threshold:
+                    nearest_gateway = gateway_coord
+                    min_distance = distance
+
+            if nearest_gateway:
+                line = kml.newlinestring(name="Hop 1")
+                line.coords = [(meter['Longitude'], meter['Latitude']),
+                               (nearest_gateway[1], nearest_gateway[0])]
+                line.style.linestyle.color = simplekml.Color.green
+                line.style.linestyle.width = 2
+                meters.at[i, "hop_level"] = 1
+                hop1_coords.append(meter_coord)
+
+            progress["value"] = (i + 1) / total_meters * 50
+            root.update_idletasks()
+
+        # Second pass: Hop 2 (pink lines to Hop 1 meters)
+        for i, meter in meters.iterrows():
+            if meter["hop_level"] != -1:
+                continue
+
+            meter_coord = (meter['Latitude'], meter['Longitude'])
+            for hop1 in hop1_coords:
+                distance = geodesic(meter_coord, hop1).meters
+                if distance <= threshold + 50:
+                    line = kml.newlinestring(name="Hop 2")
+                    line.coords = [(meter['Longitude'], meter['Latitude']),
+                                   (hop1[1], hop1[0])]
+                    line.style.linestyle.color = simplekml.Color.pink
+                    line.style.linestyle.width = 2
+                    meters.at[i, "hop_level"] = 2
+                    break
+
+            progress["value"] = 50 + (i + 1) / total_meters * 50
+            root.update_idletasks()
+
+        kml.save("Meter_Gateway_Links.kml")
+        meters.to_csv("Meter_Hop_Levels.csv", index=False)
+        messagebox.showinfo("Success", "KML + CSV saved:\n- Meter_Gateway_Links.kml\n- Meter_Hop_Levels.csv")
+
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+    finally:
+        button.config(state="normal")
+        progress["value"] = 0
+
+def generate_kml():
+    try:
+        gateways_path = gateway_entry.get()
+        meters_path = meter_entry.get()
+        threshold = float(threshold_entry.get())
+        generate_button.config(state="disabled")
+        threading.Thread(target=process_files, args=(gateways_path, meters_path, threshold, progress_bar, generate_button)).start()
+    except ValueError:
+        messagebox.showerror("Error", "Please enter a valid number for threshold.")
+
+# GUI setup
+root = tk.Tk()
+root.title("Meter-Gateway Hop KML Generator")
+
+tk.Label(root, text="Planned Gateways CSV:").grid(row=0, column=0, sticky="e")
+gateway_entry = tk.Entry(root, width=50)
+gateway_entry.grid(row=0, column=1)
+tk.Button(root, text="Browse", command=lambda: select_file(gateway_entry)).grid(row=0, column=2)
+
+tk.Label(root, text="Electricity Meters CSV:").grid(row=1, column=0, sticky="e")
+meter_entry = tk.Entry(root, width=50)
+meter_entry.grid(row=1, column=1)
+tk.Button(root, text="Browse", command=lambda: select_file(meter_entry)).grid(row=1, column=2)
+
+tk.Label(root, text="Threshold Distance (meters):").grid(row=2, column=0, sticky="e")
+threshold_entry = tk.Entry(root)
+threshold_entry.grid(row=2, column=1)
+
+generate_button = tk.Button(root, text="Generate KML", command=generate_kml)
+generate_button.grid(row=3, column=1, pady=10)
+
+progress_bar = ttk.Progressbar(root, length=400, mode='determinate')
+progress_bar.grid(row=4, column=0, columnspan=3, pady=10)
+
+root.mainloop()
