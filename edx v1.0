@@ -1,0 +1,83 @@
+making code for hop 1 connectivity 
+import pandas as pd
+from geopy.distance import geodesic
+import simplekml
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+def select_file(entry):
+    file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+    entry.delete(0, tk.END)
+    entry.insert(0, file_path)
+
+def generate_kml():
+    try:
+        gateways_path = gateway_entry.get()
+        meters_path = meter_entry.get()
+        threshold = float(threshold_entry.get())
+
+        gateways = pd.read_csv(gateways_path)
+        meters = pd.read_csv(meters_path)
+
+        kml = simplekml.Kml()
+        for _, meter in meters.iterrows():
+            meter_coord = (meter['Latitude'], meter['Longitude'])
+            nearest_gateway = None
+            min_distance = float('inf')
+            for _, gateway in gateways.iterrows():
+                gateway_coord = (gateway['Latitude'], gateway['Longitude'])
+                distance = geodesic(meter_coord, gateway_coord).meters
+                if distance < min_distance and distance <= threshold:
+                    nearest_gateway = gateway_coord
+                    min_distance = distance
+
+            if nearest_gateway:
+                line = kml.newlinestring(name="Meter to Gateway")
+                line.coords = [(meter['Longitude'], meter['Latitude']),
+                               (nearest_gateway[1], nearest_gateway[0])]
+                line.style.linestyle.color = simplekml.Color.green
+                line.style.linestyle.width = 2
+
+        kml.save("Meter_Gateway_Links.kml")
+        messagebox.showinfo("Success", "KML file saved as 'Meter_Gateway_Links.kml'")
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+
+# GUI setup
+root = tk.Tk()
+root.title("Meter-Gateway KML Generator")
+
+tk.Label(root, text="Planned Gateways CSV:").grid(row=0, column=0, sticky="e")
+gateway_entry = tk.Entry(root, width=50)
+gateway_entry.grid(row=0, column=1)
+tk.Button(root, text="Browse", command=lambda: select_file(gateway_entry)).grid(row=0, column=2)
+
+tk.Label(root, text="Electricity Meters CSV:").grid(row=1, column=0, sticky="e")
+meter_entry = tk.Entry(root, width=50)
+meter_entry.grid(row=1, column=1)
+tk.Button(root, text="Browse", command=lambda: select_file(meter_entry)).grid(row=1, column=2)
+
+tk.Label(root, text="Threshold Distance (meters):").grid(row=2, column=0, sticky="e")
+threshold_entry = tk.Entry(root)
+threshold_entry.grid(row=2, column=1)
+
+tk.Button(root, text="Generate KML", command=generate_kml).grid(row=3, column=1, pady=10)
+
+root.mainloop()
+
+
+///////////
+why the tool is slow:
+Nested Loops (O(n × m)):
+
+For every meter, you're checking every gateway and then later every Hop 1 meter.
+
+If you have thousands of meters/gateways, this quickly becomes very expensive.
+
+geopy.distance.geodesic():
+
+Accurate but slow. It's great-circle calculation (ellipsoid-based), which is overkill if you're working with small local areas.
+
+Real-time GUI Updates:
+
+Calling update_idletasks() frequently during large loops adds overhead.
