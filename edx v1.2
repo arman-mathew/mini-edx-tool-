@@ -1,0 +1,133 @@
+faster tool : 
+import pandas as pd
+import numpy as np
+import simplekml
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter import ttk
+import threading
+from scipy.spatial import cKDTree
+
+# FAST Haversine (vectorized)
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000  # meters
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
+
+    a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
+    return 2 * R * np.arcsin(np.sqrt(a))
+
+def select_file(entry):
+    file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+    entry.delete(0, tk.END)
+    entry.insert(0, file_path)
+
+def process_files(gw_path, meters_path, threshold, progress, button):
+    try:
+        gateways = pd.read_csv(gw_path)
+        meters = pd.read_csv(meters_path)
+        meters["hop_level"] = -1
+
+        kml = simplekml.Kml()
+        threshold = float(threshold)
+        second_threshold = threshold + 50
+
+        # KDTree for gateways (lat/lon to radians)
+        gw_coords = np.radians(gateways[["Latitude", "Longitude"]].values)
+        gw_tree = cKDTree(gw_coords)
+
+        # Meters in radians
+        meter_coords_rad = np.radians(meters[["Latitude", "Longitude"]].values)
+
+        # Query nearest gateway for each meter
+        distances, indices = gw_tree.query(meter_coords_rad, distance_upper_bound=np.radians(0.05))  # 0.05 rad ≈ ~3km
+
+        hop1_coords = []
+
+        for i, (dist_idx, idx) in enumerate(zip(distances, indices)):
+            lat1, lon1 = meters.at[i, "Latitude"], meters.at[i, "Longitude"]
+
+            if idx < len(gateways):
+                lat2, lon2 = gateways.at[idx, "Latitude"], gateways.at[idx, "Longitude"]
+                distance = haversine(lat1, lon1, lat2, lon2)
+
+                if distance <= threshold:
+                    meters.at[i, "hop_level"] = 1
+                    hop1_coords.append((lat1, lon1))
+                    line = kml.newlinestring(name="Hop 1")
+                    line.coords = [(lon1, lat1), (lon2, lat2)]
+                    line.style.linestyle.color = simplekml.Color.green
+                    line.style.linestyle.width = 2
+
+            progress["value"] = (i + 1) / len(meters) * 50
+            root.update_idletasks()
+
+        # Build KDTree of hop1 meters
+        if hop1_coords:
+            hop1_tree = cKDTree(np.radians(hop1_coords))
+            meter_coords = meters[["Latitude", "Longitude"]].values
+
+            for i, (lat1, lon1) in enumerate(meter_coords):
+                if meters.at[i, "hop_level"] != -1:
+                    continue
+
+                dist, idx = hop1_tree.query(np.radians([lat1, lon1]), distance_upper_bound=np.radians(0.05))
+                if idx < len(hop1_coords):
+                    lat2, lon2 = hop1_coords[idx]
+                    distance = haversine(lat1, lon1, lat2, lon2)
+
+                    if distance <= second_threshold:
+                        meters.at[i, "hop_level"] = 2
+                        line = kml.newlinestring(name="Hop 2")
+                        line.coords = [(lon1, lat1), (lon2, lat2)]
+                        line.style.linestyle.color = simplekml.Color.blue
+                        line.style.linestyle.width = 2
+
+                progress["value"] = 50 + (i + 1) / len(meters) * 50
+                root.update_idletasks()
+
+        kml.save("Meter_Gateway_Links.kml")
+        meters.to_csv("Meter_Hop_Levels.csv", index=False)
+        messagebox.showinfo("Success", "KML + CSV saved:\n- Meter_Gateway_Links.kml\n- Meter_Hop_Levels.csv")
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+    finally:
+        button.config(state="normal")
+        progress["value"] = 0
+
+def generate_kml():
+    try:
+        gw_path = gateway_entry.get()
+        meters_path = meter_entry.get()
+        threshold = float(threshold_entry.get())
+        generate_button.config(state="disabled")
+        threading.Thread(target=process_files, args=(gw_path, meters_path, threshold, progress_bar, generate_button)).start()
+    except ValueError:
+        messagebox.showerror("Error", "Please enter a valid threshold.")
+
+# GUI setup
+root = tk.Tk()
+root.title("Fast Meter-Gateway Hop KML Generator")
+
+tk.Label(root, text="Planned Gateways CSV:").grid(row=0, column=0, sticky="e")
+gateway_entry = tk.Entry(root, width=50)
+gateway_entry.grid(row=0, column=1)
+tk.Button(root, text="Browse", command=lambda: select_file(gateway_entry)).grid(row=0, column=2)
+
+tk.Label(root, text="Electricity Meters CSV:").grid(row=1, column=0, sticky="e")
+meter_entry = tk.Entry(root, width=50)
+meter_entry.grid(row=1, column=1)
+tk.Button(root, text="Browse", command=lambda: select_file(meter_entry)).grid(row=1, column=2)
+
+tk.Label(root, text="Threshold Distance (meters):").grid(row=2, column=0, sticky="e")
+threshold_entry = tk.Entry(root)
+threshold_entry.grid(row=2, column=1)
+
+generate_button = tk.Button(root, text="Generate KML", command=generate_kml)
+generate_button.grid(row=3, column=1, pady=10)
+
+progress_bar = ttk.Progressbar(root, length=400, mode='determinate')
+progress_bar.grid(row=4, column=0, columnspan=3, pady=10)
+
+root.mainloop()
