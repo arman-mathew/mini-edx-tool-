@@ -1,0 +1,319 @@
+enhanced version : 
+import pandas as pd
+import numpy as np
+import simplekml
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter import ttk
+import threading
+import os
+from scipy.spatial import cKDTree
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2.0)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2.0)**2
+    return 2 * R * np.arcsin(np.sqrt(a))
+
+def select_file(entry, file_type="CSV"):
+    file_path = filedialog.askopenfilename(filetypes=[(f"{file_type} Files", "*.csv")])
+    if file_path:
+        entry.delete(0, tk.END)
+        entry.insert(0, file_path)
+
+def process_files(gw_path, meters_path, hop1_threshold, hop2_threshold, progress, button, status_label):
+    try:
+        status_label.config(text="Loading gateway data...", fg="#2196F3")
+        root.update_idletasks()
+        
+        gateways = pd.read_csv(gw_path)
+        meters = pd.read_csv(meters_path)
+        meters["hop_level"] = -1
+        meters["connected_gateway"] = None
+
+        gateways["Gateway_Name"] = [f"Gateway_{i+1}" for i in range(len(gateways))]
+
+        base_name = os.path.splitext(os.path.basename(meters_path))[0]
+        kml_filename = f"{base_name}_Meter_Gateway_Links.kml"
+        csv_filename = f"{base_name}_Meter_Hop_Levels.csv"
+        summary_filename = f"{base_name}_Hop_Summary.csv"
+
+        kml = simplekml.Kml()
+
+        status_label.config(text="Processing Hop 1 connections...", fg="#FF9800")
+        root.update_idletasks()
+
+        gw_coords = np.radians(gateways[["Latitude", "Longitude"]].values)
+        gw_tree = cKDTree(gw_coords)
+        meter_coords_rad = np.radians(meters[["Latitude", "Longitude"]].values)
+
+        distances, indices = gw_tree.query(meter_coords_rad, distance_upper_bound=np.radians(0.05))
+
+        hop1_coords = []
+        hop1_gateway_refs = []
+
+        for i, (dist_idx, idx) in enumerate(zip(distances, indices)):
+            lat1, lon1 = meters.at[i, "Latitude"], meters.at[i, "Longitude"]
+
+            if idx < len(gateways):
+                lat2, lon2 = gateways.at[idx, "Latitude"], gateways.at[idx, "Longitude"]
+                distance = haversine(lat1, lon1, lat2, lon2)
+
+                if distance <= hop1_threshold:
+                    meters.at[i, "hop_level"] = 1
+                    meters.at[i, "connected_gateway"] = gateways.at[idx, "Gateway_Name"]
+                    hop1_coords.append((lat1, lon1))
+                    hop1_gateway_refs.append(gateways.at[idx, "Gateway_Name"])
+                    line = kml.newlinestring(name="Hop 1")
+                    line.coords = [(lon1, lat1), (lon2, lat2)]
+                    line.style.linestyle.color = simplekml.Color.green
+                    line.style.linestyle.width = 2
+
+            progress["value"] = (i + 1) / len(meters) * 50
+            root.update_idletasks()
+
+        status_label.config(text="Processing Hop 2 connections...", fg="#9C27B0")
+        root.update_idletasks()
+
+        if hop1_coords:
+            hop1_tree = cKDTree(np.radians(hop1_coords))
+            meter_coords = meters[["Latitude", "Longitude"]].values
+
+            for i, (lat1, lon1) in enumerate(meter_coords):
+                if meters.at[i, "hop_level"] != -1:
+                    continue
+
+                dist, idx = hop1_tree.query(np.radians([lat1, lon1]), distance_upper_bound=np.radians(0.05))
+                if idx < len(hop1_coords):
+                    lat2, lon2 = hop1_coords[idx]
+                    distance = haversine(lat1, lon1, lat2, lon2)
+
+                    if distance <= hop2_threshold:
+                        meters.at[i, "hop_level"] = 2
+                        meters.at[i, "connected_gateway"] = hop1_gateway_refs[idx]
+                        line = kml.newlinestring(name="Hop 2")
+                        line.coords = [(lon1, lat1), (lon2, lat2)]
+                        line.style.linestyle.color = simplekml.Color.blue
+                        line.style.linestyle.width = 2
+
+                progress["value"] = 50 + (i + 1) / len(meters) * 50
+                root.update_idletasks()
+
+        status_label.config(text="Saving files...", fg="#4CAF50")
+        root.update_idletasks()
+
+        kml.save(kml_filename)
+        meters.to_csv(csv_filename, index=False)
+
+        # Create summary CSV
+        summary = gateways[["Gateway_Name"]].copy()
+        summary["Hop_1_Count"] = summary["Gateway_Name"].map(meters[meters["hop_level"] == 1]["connected_gateway"].value_counts()).fillna(0).astype(int)
+        summary["Hop_2_Count"] = summary["Gateway_Name"].map(meters[meters["hop_level"] == 2]["connected_gateway"].value_counts()).fillna(0).astype(int)
+        summary["Total_Hops"] = summary["Hop_1_Count"] + summary["Hop_2_Count"]
+        summary.to_csv(summary_filename, index=False)
+
+        status_label.config(text="✓ Processing completed successfully!", fg="#4CAF50")
+        messagebox.showinfo("Success", f"Files generated successfully!\n\n📁 Output Files:\n• {kml_filename}\n• {csv_filename}\n• {summary_filename}")
+
+    except Exception as e:
+        status_label.config(text="❌ Error occurred during processing", fg="#F44336")
+        messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
+    finally:
+        button.config(state="normal", text="🚀 Generate Analysis")
+        progress["value"] = 0
+
+def generate_kml():
+    try:
+        gw_path = gateway_entry.get()
+        meters_path = meter_entry.get()
+        
+        if not gw_path or not meters_path:
+            messagebox.showwarning("Missing Files", "Please select both gateway and meter CSV files.")
+            return
+            
+        hop1 = float(hop1_entry.get()) if hop1_entry.get() else 1000
+        hop2 = float(hop2_entry.get()) if hop2_entry.get() else 1000
+        
+        generate_button.config(state="disabled", text="Processing...")
+        threading.Thread(target=process_files, args=(gw_path, meters_path, hop1, hop2, progress_bar, generate_button, status_label)).start()
+    except ValueError:
+        messagebox.showerror("Invalid Input", "Please enter valid numeric values for threshold distances.")
+
+def on_enter(e, widget):
+    widget.config(bg="#E3F2FD")
+
+def on_leave(e, widget):
+    widget.config(bg="white")
+
+# GUI Setup with modern styling
+root = tk.Tk()
+root.title("Artificial EDX Tool")
+root.geometry("800x650")
+root.configure(bg="#FAFAFA")
+root.resizable(True, True)
+
+# Custom style configuration
+style = ttk.Style()
+style.theme_use('clam')
+
+# Configure custom styles
+style.configure("Title.TLabel", 
+                background="#FAFAFA", 
+                foreground="#1976D2", 
+                font=("Segoe UI", 24, "bold"))
+
+style.configure("Subtitle.TLabel", 
+                background="#FAFAFA", 
+                foreground="#424242", 
+                font=("Segoe UI", 10))
+
+style.configure("Modern.TFrame", 
+                background="white", 
+                relief="solid", 
+                borderwidth=1)
+
+style.configure("Custom.TButton",
+                font=("Segoe UI", 11, "bold"),
+                foreground="white")
+
+style.map("Custom.TButton",
+          background=[('active', '#1976D2'), ('!active', '#2196F3')])
+
+# Main container with padding
+main_frame = ttk.Frame(root, style="Modern.TFrame", padding="30")
+main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+# Header section
+header_frame = ttk.Frame(main_frame)
+header_frame.pack(fill="x", pady=(0, 30))
+
+title_label = ttk.Label(header_frame, text="🔌 Artificial EDX Tool", style="Title.TLabel")
+title_label.pack()
+
+subtitle_label = ttk.Label(header_frame, text="Advanced Meter-Gateway Hop Analysis & KML Generation", style="Subtitle.TLabel")
+subtitle_label.pack(pady=(5, 0))
+
+designer_label = ttk.Label(header_frame, text="Designed by Arman Mathew", 
+                          background="#FAFAFA", foreground="#757575", font=("Segoe UI", 9, "italic"))
+designer_label.pack(pady=(10, 0))
+
+# File selection section
+file_frame = ttk.LabelFrame(main_frame, text="📁 File Selection", padding="20")
+file_frame.pack(fill="x", pady=(0, 20))
+
+# Gateway file selection
+gateway_frame = ttk.Frame(file_frame)
+gateway_frame.pack(fill="x", pady=(0, 15))
+
+ttk.Label(gateway_frame, text="Planned Gateways CSV:", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+gateway_input_frame = ttk.Frame(gateway_frame)
+gateway_input_frame.pack(fill="x", pady=(5, 0))
+
+gateway_entry = tk.Entry(gateway_input_frame, font=("Segoe UI", 10), relief="solid", bd=1)
+gateway_entry.pack(side="left", fill="x", expand=True, ipady=8)
+gateway_entry.bind("<Enter>", lambda e: on_enter(e, gateway_entry))
+gateway_entry.bind("<Leave>", lambda e: on_leave(e, gateway_entry))
+
+gateway_btn = tk.Button(gateway_input_frame, text="📂 Browse", 
+                       command=lambda: select_file(gateway_entry),
+                       bg="#4CAF50", fg="white", font=("Segoe UI", 9, "bold"),
+                       relief="flat", padx=20, pady=8)
+gateway_btn.pack(side="right", padx=(10, 0))
+
+# Meter file selection
+meter_frame = ttk.Frame(file_frame)
+meter_frame.pack(fill="x")
+
+ttk.Label(meter_frame, text="Electricity Meters CSV:", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+meter_input_frame = ttk.Frame(meter_frame)
+meter_input_frame.pack(fill="x", pady=(5, 0))
+
+meter_entry = tk.Entry(meter_input_frame, font=("Segoe UI", 10), relief="solid", bd=1)
+meter_entry.pack(side="left", fill="x", expand=True, ipady=8)
+meter_entry.bind("<Enter>", lambda e: on_enter(e, meter_entry))
+meter_entry.bind("<Leave>", lambda e: on_leave(e, meter_entry))
+
+meter_btn = tk.Button(meter_input_frame, text="📂 Browse", 
+                     command=lambda: select_file(meter_entry),
+                     bg="#4CAF50", fg="white", font=("Segoe UI", 9, "bold"),
+                     relief="flat", padx=20, pady=8)
+meter_btn.pack(side="right", padx=(10, 0))
+
+# Parameters section
+params_frame = ttk.LabelFrame(main_frame, text="⚙️ Connection Parameters", padding="20")
+params_frame.pack(fill="x", pady=(0, 20))
+
+params_grid = ttk.Frame(params_frame)
+params_grid.pack(fill="x")
+
+# Hop 1 parameter
+hop1_frame = ttk.Frame(params_grid)
+hop1_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+ttk.Label(hop1_frame, text="Hop 1 Distance (meters):", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+hop1_entry = tk.Entry(hop1_frame, font=("Segoe UI", 12), relief="solid", bd=1, justify="center")
+hop1_entry.pack(fill="x", pady=(5, 0), ipady=8)
+hop1_entry.insert(0, "1000")
+hop1_entry.bind("<Enter>", lambda e: on_enter(e, hop1_entry))
+hop1_entry.bind("<Leave>", lambda e: on_leave(e, hop1_entry))
+
+# Hop 2 parameter
+hop2_frame = ttk.Frame(params_grid)
+hop2_frame.pack(side="right", fill="x", expand=True, padx=(10, 0))
+
+ttk.Label(hop2_frame, text="Hop 2 Distance (meters):", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+hop2_entry = tk.Entry(hop2_frame, font=("Segoe UI", 12), relief="solid", bd=1, justify="center")
+hop2_entry.pack(fill="x", pady=(5, 0), ipady=8)
+hop2_entry.insert(0, "1000")
+hop2_entry.bind("<Enter>", lambda e: on_enter(e, hop2_entry))
+hop2_entry.bind("<Leave>", lambda e: on_leave(e, hop2_entry))
+
+# Action section
+action_frame = ttk.Frame(main_frame)
+action_frame.pack(fill="x", pady=(0, 20))
+
+generate_button = tk.Button(action_frame, text="🚀 Generate Analysis", 
+                           command=generate_kml,
+                           bg="#2196F3", fg="white", font=("Segoe UI", 12, "bold"),
+                           relief="flat", padx=40, pady=15)
+generate_button.pack(pady=10)
+
+# Progress section
+progress_frame = ttk.LabelFrame(main_frame, text="📊 Progress", padding="20")
+progress_frame.pack(fill="x")
+
+progress_bar = ttk.Progressbar(progress_frame, length=400, mode='determinate', 
+                              style="TProgressbar")
+progress_bar.pack(fill="x", pady=(0, 10))
+
+status_label = tk.Label(progress_frame, text="Ready to process files...", 
+                       bg="white", fg="#757575", font=("Segoe UI", 10))
+status_label.pack()
+
+# Configure progress bar style
+style.configure("TProgressbar", 
+                background="#2196F3",
+                troughcolor="#E0E0E0",
+                borderwidth=0,
+                lightcolor="#2196F3",
+                darkcolor="#2196F3")
+
+# Hover effects for buttons
+def on_button_enter(e, btn, color):
+    btn.config(bg=color)
+
+def on_button_leave(e, btn, color):
+    btn.config(bg=color)
+
+gateway_btn.bind("<Enter>", lambda e: on_button_enter(e, gateway_btn, "#45A049"))
+gateway_btn.bind("<Leave>", lambda e: on_button_leave(e, gateway_btn, "#4CAF50"))
+
+meter_btn.bind("<Enter>", lambda e: on_button_enter(e, meter_btn, "#45A049"))
+meter_btn.bind("<Leave>", lambda e: on_button_leave(e, meter_btn, "#4CAF50"))
+
+generate_button.bind("<Enter>", lambda e: on_button_enter(e, generate_button, "#1976D2"))
+generate_button.bind("<Leave>", lambda e: on_button_leave(e, generate_button, "#2196F3"))
+
+root.mainloop()
